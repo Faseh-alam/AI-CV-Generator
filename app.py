@@ -1108,6 +1108,10 @@ HTML_TEMPLATE = '''
 def index():
     return render_template_string(HTML_TEMPLATE)
 
+@app.route('/health')
+def health():
+    return "OK", 200
+
 # Load experience data
 def load_experience_data():
     """Load experience data from JSON file"""
@@ -1229,6 +1233,7 @@ def get_sample_data():
 EXPERIENCE_DATA = load_experience_data()
 
 if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
     print("🚀 Starting Enhanced Claude CV Generator...")
     print("\n✨ Enhanced Features:")
     print("- Intelligent role type detection (Mobile, AI/ML, Frontend, Backend, etc.)")
@@ -1254,9 +1259,9 @@ if __name__ == '__main__':
     print("2. Create experience_data.json with your data")
     print("3. pip install anthropic flask python-dotenv")
     
-    print(f"\n✅ Access app at: http://localhost:5000")
+    print(f"\n✅ Access app at: http://localhost:{port}")
     
     if not client:
         print("\n⚠️  WARNING: Claude client not initialized. Check ANTHROPIC_API_KEY.")
     
-    app.run(debug=True, port=5000)
+    app.run(host='0.0.0.0', port=port)
