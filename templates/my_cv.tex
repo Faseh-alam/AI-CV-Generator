@@ -1,0 +1,188 @@
+\documentclass[letterpaper,11pt]{article}
+
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+\usepackage{fontawesome5}
+\usepackage{multicol}
+\setlength{\multicolsep}{-3.0pt}
+\setlength{\columnsep}{-1pt}
+\input{glyphtounicode}
+\usepackage[margin=1.4cm]{geometry}
+
+
+\pagestyle{fancy}
+\fancyhf{} % clear all header and footer fields
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Adjust margins
+\addtolength{\oddsidemargin}{-0.15in}
+ \addtolength{\textwidth}{0.3in}
+
+\urlstyle{same}
+
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+% Sections formatting
+\titleformat{\section}{
+  \vspace{-4pt}\scshape\raggedright\large\bfseries
+}{}{0em}{}[\color{black}\titlerule \vspace{-5pt}]
+
+% Ensure that generate pdf is machine readable/ATS parsable
+\pdfgentounicode=1
+
+%-------------------------
+% Custom commands
+\newcommand{\resumeItem}[1]{
+  \item\small{
+    {#1 \vspace{0pt}}
+  }
+}
+
+\newcommand{\classesList}[4]{
+    \item\small{
+        {#1 #2 #3 #4 \vspace{-2pt}}
+  }
+}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{1.0\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{#1} & \textbf{\small #2} \\
+      \textit{\small#3} & \textit{\small #4} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubSubheading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \textit{\small#1} & \textit{\small #2} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{1.001\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & \textbf{\small #2}\\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubItem}[1]{\resumeItem{#1}\vspace{-4pt}}
+
+\renewcommand\labelitemi{$\vcenter{\hbox{\tiny$\bullet$}}$}
+\renewcommand\labelitemii{$\vcenter{\hbox{\tiny$\bullet$}}$}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.0in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}\vspace{0pt}
+\newcommand{\resumeItemListStart}{\begin{itemize}}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
+
+
+
+\begin{document}
+
+%----------HEADING----------
+\begin{center}
+    {\Large \scshape Hakeem Abbas} \\[2mm]
+    \footnotesize \raisebox{-0.1\height}
+    \faPhone\ {+1 (650) 526-8926} ~ 
+    {\faEnvelope\  {sydhakeemabbas@gmail.com}} ~ 
+    {\faLinkedin\ \underline{\href{https://www.linkedin.com/in/hakeemsyd/}{linkedin.com/in/hakeemsyd}}  ~
+    {\faGithub\ \underline{\href{https://github.com/hakeemsyd}{github.com/hakeemsyd}} ~
+    {\faMapMarker\ {San Ramon, CA}}
+    \vspace{-8pt}
+\end{center}
+
+%-----------SUMMARY-----------
+\section{Professional Summary}
+\small{
+    Senior Frontend Developer with 10+ years at Microsoft and Facebook, expert in Next.js, React, TypeScript, and Tailwind CSS. Specialized in building accessible, SEO-optimized web applications with seamless CMS integrations using Wagtail and Python. Proven ability to deliver high-quality, maintainable code with comprehensive testing for content-driven platforms serving millions of users.
+}
+\vspace{-8pt}
+
+%-----------Experience---------------
+\section{Work Experience}
+    \resumeSubHeadingListStart
+                \resumeSubheading{HELLOGOV AI}{Sep 2023 -- Present}{LEAD FULL-STACK ENGINEER}{Remote} 
+                \resumeItemListStart
+                    \resumeItem{Built responsive, accessible web applications using \textbf{Next.js}, \textbf{React}, and \textbf{TypeScript} with \textbf{Tailwind CSS}, serving \textbf{50,000+ users} applying for US passports. Implemented \textbf{WCAG 2.1} compliance and \textbf{SEO optimization} strategies, improving search rankings by \textbf{40\%} and user accessibility scores.}
+                    \resumeItem{Architected dynamic content delivery system integrating government data sources and form schemas, processing \textbf{200+} passport application fields. Developed \textbf{Python-based} data scraping and validation pipelines from official US State Department sources, ensuring \textbf{99.5\%} data accuracy.}
+                    \resumeItem{Established comprehensive testing framework using \textbf{Jest} and \textbf{React Testing Library}, achieving \textbf{85\%} code coverage. Implemented automated integration tests for form validation and data processing workflows, reducing production bugs by \textbf{60\%}.}
+                    \resumeItem{Optimized application performance through \textbf{code splitting}, \textbf{lazy loading}, and efficient state management, achieving \textbf{95+} Lighthouse scores and reducing page load times by \textbf{45\%} for government form interfaces.}
+                    \resumeItemListEnd
+                     \resumeSubheading{INDEPENDENT CONTRACTOR}{Mar 2020 -- Sep 2023 }{FULL-STACK ENGINEER}{Remote} 
+                \resumeItemListStart
+                    \resumeItem{Architected and migrated complex content management systems for client projects, specializing in \textbf{Wagtail CMS} integration with \textbf{Python} backends and seamless \textbf{content migration} strategies. Developed \textbf{API} integrations and automated content synchronization workflows, ensuring \textbf{99.5\% data accuracy} and \textbf{SEO preservation} across enterprise-level applications.}
+                    \resumeItem{Built responsive, \textbf{SEO-optimized} web applications using \textbf{Next.js}, \textbf{React}, and \textbf{TypeScript} with \textbf{Tailwind CSS}, serving diverse client needs across multiple industries. Implemented comprehensive \textbf{accessibility standards (WCAG 2.1)} and performance optimization strategies, achieving \textbf{95+ Lighthouse scores} and improving search rankings by \textbf{40\%.}}
+                    \resumeItem{Established comprehensive testing frameworks using \textbf{Jest} and \textbf{React Testing Library}, achieving \textbf{85\% code coverage} across client projects. Implemented automated \textbf{unit testing} and \textbf{integration testing} pipelines for form validation and content management workflows, reducing production bugs by \textbf{60\%} and ensuring code reliability.}
+                    \resumeItem{Delivered end-to-end solutions using \textbf{React}, \textbf{Node.js}, \textbf{MongoDB}, and \textbf{React Native}, collaborating with cross-functional client teams to define requirements and deliver milestones. Optimized application performance through \textbf{code splitting}, \textbf{lazy loading}, and efficient state management, reducing page load times by \textbf{45\%} for content-driven platforms.}
+                    \resumeItemListEnd
+            \resumeSubheading{FACEBOOK}{Aug 2017 -- Mar 2020}{SOFTWARE ENGINEER}{Menlo Park, CA} 
+                \resumeItemListStart
+                    \resumeItem{Developed \textbf{React-based} content management interfaces for Facebook's News Feed system, serving \textbf{2.8+ billion users}. Built scalable, maintainable components with \textbf{TypeScript} for content moderation and publishing workflows, ensuring optimal performance across web and mobile platforms.}
+                    \resumeItem{Migrated legacy \textbf{GraphQL} content delivery systems to \textbf{live queries and subscriptions}, improving content loading performance by \textbf{35\%} and enabling real-time updates for dynamic content feeds. Implemented comprehensive \textbf{A/B testing} framework for content optimization strategies.}
+                    \resumeItem{Architected responsive web applications for \textbf{Oculus VR} content management, integrating \textbf{React} with backend \textbf{Python} services for seamless content publishing and distribution. Developed accessible UI components following \textbf{WCAG guidelines} for diverse user experiences.}
+                    \resumeItem{Established end-to-end testing protocols for content management systems using \textbf{Jest} and \textbf{custom testing frameworks}, achieving \textbf{90\% code coverage} and reducing content-related production issues by \textbf{50\%} across Facebook's publishing infrastructure.}
+                    \resumeItemListEnd
+                    \vspace{6.4pt}
+            \resumeSubheading{MICROSOFT}{Oct 2012 -- Jun 2017}{SOFTWARE ENGINEER II}{Redmond, WA}
+                \resumeItemListStart
+                    \resumeItem{Developed accessible \textbf{React-based} interfaces for \textbf{Skype} consumer applications serving \textbf{300+ million users}, implementing comprehensive accessibility features, \textbf{WCAG compliance}, and user feedback systems. Built responsive web components using \textbf{TypeScript} and \textbf{modern JavaScript}, improving user experience scores by \textbf{40\%}.}
+                    \resumeItem{Architected content delivery systems for \textbf{Skype messaging}, \textbf{user presence}, and \textbf{Remote Desktop} applications. Implemented real-time message syncing and content synchronization using \textbf{GraphQL} and \textbf{REST APIs}, achieving \textbf{99.9\%} delivery reliability and seamless cross-platform functionality.}
+                    \resumeItem{Established comprehensive testing frameworks using \textbf{Jest} and automated testing tools, achieving \textbf{85\%} code coverage. Built and maintained \textbf{CI/CD pipelines} for Android and web applications, implementing \textbf{telemetry systems} and \textbf{A/B testing} that reduced production issues by \textbf{45\%} and improved deployment efficiency.}
+                    \resumeItem{Developed \textbf{JNI C++/Java} integration layers for seamless communication between platforms, enabling cross-platform features for \textbf{Remote Desktop} clients. Built custom UI widgets using \textbf{Material Design} principles and \textbf{MVP architecture}, optimizing performance for enterprise applications globally.}
+                    \resumeItemListEnd
+    \resumeSubHeadingListEnd
+    \vspace{-12pt}
+
+%-----------PROJECTS-----------
+\section{Projects} 
+    \vspace{-5pt}
+    \resumeSubHeadingListStart
+    \resumeProjectHeading
+            {\textbf{EarthFund} $|$ \emph{\href{https://earthfund.io/}{Website}}}{\textbf{\small Next.js $|$ TypeScript $|$ Python $|$ AWS $|$ PostgreSQL}}
+            \resumeItemListStart
+                \resumeItem{Built responsive, \textbf{SEO-optimized} fundraising platform using \textbf{Next.js} and \textbf{TypeScript}, achieving \textbf{95+} Lighthouse scores and \textbf{WCAG 2.1} compliance for accessibility standards.}
+                \resumeItem{Implemented dynamic content management system with \textbf{Python} backend integration, managing \textbf{500+} environmental project listings with \textbf{real-time updates} and search optimization.}
+                \resumeItem{Developed comprehensive testing suite using \textbf{Jest} and \textbf{React Testing Library}, achieving \textbf{88\%} code coverage and reducing content-related bugs by \textbf{55\%}.}
+            \resumeItemListEnd
+   
+    \resumeProjectHeading
+            {\textbf{YogaJoint} $|$ \emph{\href{https://www.yogajoint.com/}{Website}}}{\textbf{\small React $|$ TypeScript $|$ Tailwind CSS $|$ AWS $|$ Node.js $|$ PostgreSQL}}
+            \resumeItemListStart
+                \resumeItem{Developed full-stack fitness platform with responsive design using \textbf{React} and \textbf{Tailwind CSS}, supporting \textbf{10,000+} class bookings and \textbf{real-time content} updates.}
+                \resumeItem{Created content management system for instructors to publish schedules and class information, with automated \textbf{SEO optimization} improving search rankings by \textbf{40\%}.}
+                \resumeItem{Built comprehensive testing infrastructure achieving \textbf{80\%} code coverage, with automated content validation and performance monitoring for scalable operations.}
+            \resumeItemListEnd
+
+\resumeSubHeadingListEnd
+\vspace{-16pt}
+
+%-----------PROGRAMMING SKILLS-----------
+\section{Technical Skills}
+ \begin{itemize}[leftmargin=0.15in, label={}]
+    \small{\item{   
+     \textbf{Languages}{: JavaScript, TypeScript, Python, HTML5, CSS3, SQL, C++, Java} \\[1mm]
+     \textbf{Frontend Development}{: React.js, Next.js, Vue.js, Tailwind CSS, SCSS, Material-UI, Responsive Design} \\[1mm]
+     \textbf{Backend Development}{: Node.js, NestJS, Express.js, Python, GraphQL, REST APIs, Microservices} \\[1mm]
+     \textbf{CMS \& Content Management}{: Wagtail, Content Migration, SEO Optimization, Accessibility (WCAG)} \\[1mm]
+     \textbf{Databases}{: PostgreSQL, MongoDB, MySQL, SQLite} \\[1mm]
+     \textbf{Testing \& Quality}{: Jest, React Testing Library, Unit Testing, Integration Testing, Cypress} \\[1mm]
+     \textbf{Developer Tools}{: Git, Docker, AWS (Lambda, S3, EC2), Azure, CI/CD Pipelines, Webpack}\\ [1mm]
+    }}
+ \end{itemize}
+ \vspace{-16pt}
+
+\end{document}
