@@ -1,0 +1,43 @@
+{
+  "name": "ats-resume-optimizer",
+  "version": "1.0.0",
+  "description": "AI-powered resume optimization system using Claude AI",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "test": "jest",
+    "build": "npm run build:client",
+    "build:client": "cd client && npm run build"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.0.0",
+    "dotenv": "^16.3.1",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.11.3",
+    "redis": "^4.6.8",
+    "joi": "^17.9.2",
+    "winston": "^3.10.0",
+    "pdf-parse": "^1.1.1",
+    "mammoth": "^1.6.0",
+    "pdfkit": "^0.13.0",
+    "axios": "^1.5.0",
+    "stripe": "^13.5.0",
+    "nodemailer": "^6.9.4",
+    "uuid": "^9.0.0",
+    "aws-sdk": "^2.1490.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jest": "^29.6.4",
+    "supertest": "^6.3.3",
+    "@types/jest": "^29.5.5"
+  },
+  "keywords": ["resume", "ats", "ai", "optimization", "claude"],
+  "author": "Your Name",
+  "license": "MIT"
+}
