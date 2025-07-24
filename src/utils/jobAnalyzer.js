@@ -1,4 +1,369 @@
 const logger = require('./logger');
+const { LRUCache } = require('lru-cache');
+const crypto = require('crypto');
+
+class TrieNode {
+  constructor() {
+    this.children = new Map();
+    this.isEndOfWord = false;
+    this.metadata = null;
+  }
+}
+
+class OptimizedJobAnalyzer {
+  constructor() {
+    this.keywordTrie = new TrieNode();
+    this.analysisCache = new LRUCache({
+      max: 1000,
+      ttl: 1000 * 60 * 60 * 24, // 24 hours
+      updateAgeOnGet: true
+    });
+    
+    this.initializeKeywordDatabase();
+  }
+
+  async initializeKeywordDatabase() {
+    // Load keyword database into Trie for O(n) searching
+    const keywords = await this.loadKeywordDatabase();
+    
+    for (const keyword of keywords) {
+      this.insertIntoTrie(keyword.term.toLowerCase(), keyword);
+    }
+    
+    logger.info('Keyword database initialized', {
+      keywordCount: keywords.length
+    });
+  }
+
+  loadKeywordDatabase() {
+    // Return comprehensive keyword database
+    const keywords = [];
+    
+    // Programming Languages
+    const programmingLanguages = [
+      'javascript', 'python', 'java', 'c++', 'c#', 'php', 'ruby', 'go', 'rust',
+      'typescript', 'kotlin', 'swift', 'scala', 'r', 'matlab'
+    ];
+    
+    programmingLanguages.forEach(lang => {
+      keywords.push({
+        term: lang,
+        category: 'technical',
+        subcategory: 'Programming Languages',
+        importance: 85
+      });
+    });
+    
+    // Web Technologies
+    const webTech = [
+      'html', 'css', 'react', 'angular', 'vue', 'node.js', 'express', 'django',
+      'flask', 'spring', 'laravel', 'rails', 'asp.net'
+    ];
+    
+    webTech.forEach(tech => {
+      keywords.push({
+        term: tech,
+        category: 'technical',
+        subcategory: 'Web Technologies',
+        importance: 80
+      });
+    });
+    
+    // Add more categories...
+    return keywords;
+  }
+
+  insertIntoTrie(word, metadata) {
+    let node = this.keywordTrie;
+    
+    for (const char of word) {
+      if (!node.children.has(char)) {
+        node.children.set(char, new TrieNode());
+      }
+      node = node.children.get(char);
+    }
+    
+    node.isEndOfWord = true;
+    node.metadata = metadata;
+  }
+
+  async analyzeJob(description, requirements = '', options = {}) {
+    const analysisId = crypto.randomBytes(16).toString('hex');
+    const startTime = Date.now();
+    
+    try {
+      // Check cache
+      const cacheKey = this.generateCacheKey(description, requirements);
+      const cached = this.analysisCache.get(cacheKey);
+      
+      if (cached && !options.forceAnalysis) {
+        logger.info('Job analysis cache hit', { analysisId });
+        return cached;
+      }
+      
+      // Preprocess text
+      const processedText = this.preprocessText(description, requirements);
+      
+      // Perform analysis in parallel
+      const [
+        keywords,
+        industry,
+        level,
+        sentiment,
+        complexity
+      ] = await Promise.all([
+        this.extractKeywordsOptimized(processedText),
+        this.detectIndustryML(processedText),
+        this.classifyJobLevel(processedText),
+        this.analyzeSentiment(processedText),
+        this.calculateComplexity(processedText)
+      ]);
+      
+      // Generate insights
+      const insights = await this.generateInsights({
+        keywords,
+        industry,
+        level,
+        sentiment,
+        complexity
+      });
+      
+      const result = {
+        keywords,
+        industry,
+        level,
+        sentiment,
+        complexity,
+        insights,
+        metadata: {
+          analysisId,
+          timestamp: new Date().toISOString(),
+          processingTime: Date.now() - startTime
+        }
+      };
+      
+      // Cache result
+      this.analysisCache.set(cacheKey, result);
+      
+      return result;
+      
+    } catch (error) {
+      logger.error('Job analysis failed', {
+        analysisId,
+        error: error.message
+      });
+      
+      throw new AnalysisError(
+        'Failed to analyze job description',
+        'ANALYSIS_ERROR'
+      );
+    }
+  }
+
+  extractKeywordsOptimized(text) {
+    const words = text.toLowerCase().split(/\s+/);
+    const foundKeywords = new Map();
+    const bigramKeywords = new Map();
+    
+    // Single pass for unigrams and bigrams
+    for (let i = 0; i < words.length; i++) {
+      // Check unigram
+      const keyword = this.searchTrie(words[i]);
+      if (keyword) {
+        this.updateKeywordMap(foundKeywords, keyword);
+      }
+      
+      // Check bigram
+      if (i < words.length - 1) {
+        const bigram = `${words[i]} ${words[i + 1]}`;
+        const bigramKeyword = this.searchTrie(bigram);
+        if (bigramKeyword) {
+          this.updateKeywordMap(bigramKeywords, bigramKeyword);
+        }
+      }
+    }
+    
+    // Merge and prioritize bigrams over unigrams
+    return this.mergeKeywordMaps(foundKeywords, bigramKeywords);
+  }
+
+  searchTrie(word) {
+    let node = this.keywordTrie;
+    
+    for (const char of word) {
+      if (!node.children.has(char)) {
+        return null;
+      }
+      node = node.children.get(char);
+    }
+    
+    return node.isEndOfWord ? node.metadata : null;
+  }
+
+  updateKeywordMap(map, keyword) {
+    const key = keyword.term;
+    if (map.has(key)) {
+      map.get(key).frequency++;
+    } else {
+      map.set(key, {
+        ...keyword,
+        frequency: 1
+      });
+    }
+  }
+
+  mergeKeywordMaps(unigrams, bigrams) {
+    const result = [];
+    
+    // Add bigrams first (higher priority)
+    for (const keyword of bigrams.values()) {
+      result.push(keyword);
+    }
+    
+    // Add unigrams that don't conflict with bigrams
+    for (const keyword of unigrams.values()) {
+      const conflicts = result.some(existing => 
+        existing.term.includes(keyword.term) || keyword.term.includes(existing.term)
+      );
+      
+      if (!conflicts) {
+        result.push(keyword);
+      }
+    }
+    
+    return result.sort((a, b) => b.importance - a.importance);
+  }
+
+  preprocessText(description, requirements) {
+    return `${description} ${requirements}`.toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  generateCacheKey(description, requirements) {
+    const content = `${description}${requirements}`;
+    return crypto.createHash('md5').update(content).digest('hex');
+  }
+
+  async detectIndustryML(text) {
+    // Simplified industry detection - in production, use ML model
+    const industryKeywords = {
+      'Technology': ['software', 'tech', 'api', 'cloud', 'ai', 'machine learning'],
+      'Finance': ['financial', 'bank', 'trading', 'investment', 'fintech'],
+      'Healthcare': ['health', 'medical', 'patient', 'clinical', 'pharmaceutical'],
+      'E-commerce': ['ecommerce', 'retail', 'marketplace', 'shopping']
+    };
+    
+    let bestMatch = 'Other';
+    let maxScore = 0;
+    
+    Object.entries(industryKeywords).forEach(([industry, keywords]) => {
+      const score = keywords.reduce((acc, keyword) => {
+        return acc + (text.includes(keyword) ? 1 : 0);
+      }, 0);
+      
+      if (score > maxScore) {
+        maxScore = score;
+        bestMatch = industry;
+      }
+    });
+    
+    return {
+      primary: bestMatch,
+      confidence: maxScore / 10, // Normalize
+      alternatives: []
+    };
+  }
+
+  classifyJobLevel(text) {
+    // Use existing logic from original implementation
+    return classifyJobLevel('', text);
+  }
+
+  analyzeSentiment(text) {
+    // Simple sentiment analysis - in production, use proper NLP library
+    const positiveWords = ['exciting', 'innovative', 'growth', 'opportunity', 'collaborative'];
+    const negativeWords = ['demanding', 'pressure', 'strict', 'challenging', 'difficult'];
+    
+    let score = 0;
+    positiveWords.forEach(word => {
+      if (text.includes(word)) score += 1;
+    });
+    negativeWords.forEach(word => {
+      if (text.includes(word)) score -= 1;
+    });
+    
+    return {
+      score: score / 10, // Normalize to -1 to 1
+      label: score > 0 ? 'positive' : score < 0 ? 'negative' : 'neutral'
+    };
+  }
+
+  calculateComplexity(text) {
+    // Use existing complexity calculation logic
+    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+    const words = text.split(/\s+/).filter(w => w.length > 0);
+    
+    const avgWordsPerSentence = words.length / sentences.length;
+    const readingEase = 206.835 - 1.015 * avgWordsPerSentence;
+    
+    return {
+      readingLevel: this.getReadingLevel(readingEase),
+      score: Math.max(0, Math.min(100, readingEase)),
+      avgSentenceLength: Math.round(avgWordsPerSentence)
+    };
+  }
+
+  getReadingLevel(score) {
+    if (score >= 90) return 'Very Easy';
+    if (score >= 80) return 'Easy';
+    if (score >= 70) return 'Fairly Easy';
+    if (score >= 60) return 'Standard';
+    if (score >= 50) return 'Fairly Difficult';
+    if (score >= 30) return 'Difficult';
+    return 'Very Difficult';
+  }
+
+  async generateInsights(analysis) {
+    const insights = [];
+    
+    // Keyword insights
+    const requiredKeywords = analysis.keywords.filter(k => k.type === 'required');
+    
+    if (requiredKeywords.length > 10) {
+      insights.push({
+        type: 'warning',
+        message: 'High number of required keywords may limit candidate pool',
+        impact: 'high',
+        recommendation: 'Consider marking some keywords as preferred instead of required'
+      });
+    }
+    
+    // Industry alignment
+    if (analysis.industry.confidence < 0.6) {
+      insights.push({
+        type: 'info',
+        message: 'Job description spans multiple industries',
+        impact: 'medium',
+        recommendation: 'Consider adding industry-specific keywords for clarity'
+      });
+    }
+    
+    return insights;
+  }
+}
+
+class AnalysisError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+    this.isOperational = true;
+  }
+}
+
+// Create singleton instance
+const optimizedJobAnalyzer = new OptimizedJobAnalyzer();
 
 // Extract keywords from job description using NLP techniques
 const extractJobKeywords = (description, requirements = '') => {
@@ -356,12 +721,27 @@ const extractLocation = (description) => {
   return null;
 };
 
+// Wrapper functions for backward compatibility
+const extractJobKeywordsWrapper = async (description, requirements = '') => {
+  try {
+    const analysis = await optimizedJobAnalyzer.analyzeJob(description, requirements);
+    return analysis.keywords;
+  } catch (error) {
+    logger.error('Optimized keyword extraction failed, falling back to basic', { error: error.message });
+    
+    // Fallback to original implementation
+    return extractJobKeywords(description, requirements);
+  }
+};
+
 module.exports = {
-  extractJobKeywords,
+  extractJobKeywords: extractJobKeywordsWrapper,
+  extractJobKeywordsOriginal: extractJobKeywords,
   classifyJobLevel,
   detectIndustry,
   extractSalaryInfo,
   extractLocation,
   calculateImportance,
-  determineRequirementType
+  determineRequirementType,
+  OptimizedJobAnalyzer
 };

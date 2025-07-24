@@ -1,5 +1,5 @@
 const express = require('express');
-const { register, login, logout, getMe, forgotPassword, resetPassword } = require('../controllers/authController');
+const { register, login, logout, getMe, forgotPassword, resetPassword, refreshToken } = require('../controllers/authController');
 const { protect } = require('../middleware/auth');
 const { authLimiter } = require('../middleware/rateLimiter');
 
@@ -11,6 +11,7 @@ router.use(authLimiter);
 router.post('/register', register);
 router.post('/login', login);
 router.post('/logout', logout);
+router.post('/refresh', refreshToken);
 router.get('/me', protect, getMe);
 router.post('/forgot-password', forgotPassword);
 router.put('/reset-password/:resettoken', resetPassword);

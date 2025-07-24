@@ -1,34 +1,172 @@
 const axios = require('axios');
+const crypto = require('crypto');
+const CircuitBreaker = require('opossum');
+const { KMS } = require('aws-sdk');
 const logger = require('./logger');
 
 const CLAUDE_API_URL = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
-const CLAUDE_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-// Create axios instance for Claude API
-const claudeAPI = axios.create({
-  baseURL: CLAUDE_API_URL,
-  headers: {
-    'Content-Type': 'application/json',
-    'x-api-key': CLAUDE_API_KEY,
-    'anthropic-version': '2023-06-01'
-  },
-  timeout: 30000 // 30 seconds timeout
-});
+class SecureClaudeService {
+  constructor() {
+    this.kms = new KMS();
+    this.apiKey = null;
+    this.keyRotationInterval = 24 * 60 * 60 * 1000; // 24 hours
+    
+    // Circuit breaker configuration
+    this.circuitBreakerOptions = {
+      timeout: 30000,
+      errorThresholdPercentage: 50,
+      resetTimeout: 30000,
+      rollingCountTimeout: 10000,
+      rollingCountBuckets: 10,
+      name: 'claude-api'
+    };
+    
+    this.initializeService();
+  }
 
-// Analyze job description with Claude AI
-const analyzeJobWithClaude = async (description, requirements = '') => {
-  try {
-    if (!CLAUDE_API_KEY) {
-      throw new Error('Claude API key not configured');
+  async initializeService() {
+    try {
+      // Decrypt API key from KMS
+      await this.rotateApiKey();
+      
+      // Schedule key rotation
+      setInterval(() => this.rotateApiKey(), this.keyRotationInterval);
+    } catch (error) {
+      logger.error('Failed to initialize Claude service', { error: error.message });
     }
+  }
 
-    const prompt = `
-You are an expert job analysis system. Analyze the following job description and extract structured information.
+  async rotateApiKey() {
+    try {
+      if (process.env.ENCRYPTED_CLAUDE_API_KEY) {
+        const { Plaintext } = await this.kms.decrypt({
+          CiphertextBlob: Buffer.from(process.env.ENCRYPTED_CLAUDE_API_KEY, 'base64')
+        }).promise();
+        
+        this.apiKey = Plaintext.toString();
+        logger.info('Claude API key rotated successfully');
+      } else {
+        // Fallback to plain text for development
+        this.apiKey = process.env.ANTHROPIC_API_KEY;
+        logger.warn('Using plain text API key - not recommended for production');
+      }
+    } catch (error) {
+      logger.error('Failed to rotate API key', { error: error.message });
+      throw new Error('Service initialization failed');
+    }
+  }
+
+  createSecureRequest(endpoint, data) {
+    const timestamp = Date.now();
+    const nonce = crypto.randomBytes(16).toString('hex');
+    
+    // Create request signature
+    const payload = JSON.stringify({
+      endpoint,
+      data,
+      timestamp,
+      nonce
+    });
+    
+    const signature = crypto
+      .createHmac('sha256', this.apiKey)
+      .update(payload)
+      .digest('hex');
+    
+    return {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': this.apiKey,
+        'x-timestamp': timestamp,
+        'x-nonce': nonce,
+        'x-signature': signature,
+        'anthropic-version': '2023-06-01'
+      },
+      data
+    };
+  }
+
+  async analyzeJobWithCircuitBreaker(description, requirements) {
+    const operation = async () => {
+      try {
+        const request = this.createSecureRequest('/v1/messages', {
+          model: 'claude-3-sonnet-20240229',
+          max_tokens: 2000,
+          temperature: 0.1,
+          messages: [{
+            role: 'user',
+            content: this.createJobAnalysisPrompt(description, requirements)
+          }]
+        });
+
+        const response = await axios.post(
+          `${CLAUDE_API_URL}/v1/messages`,
+          request.data,
+          { 
+            headers: request.headers,
+            timeout: 25000 // 25 second timeout
+          }
+        );
+
+        return this.parseJobAnalysisResponse(response.data);
+      } catch (error) {
+        // Sanitize error before logging
+        const sanitizedError = this.sanitizeError(error);
+        logger.error('Claude API call failed', sanitizedError);
+        
+        // Throw user-friendly error
+        if (error.response?.status === 429) {
+          throw new ServiceError('AI service is busy, please try again later', 'RATE_LIMITED');
+        } else if (error.response?.status === 401) {
+          throw new ServiceError('AI service configuration error', 'AUTH_ERROR');
+        } else {
+          throw new ServiceError('AI analysis temporarily unavailable', 'SERVICE_ERROR');
+        }
+      }
+    };
+
+    // Create circuit breaker
+    const breaker = new CircuitBreaker(operation, this.circuitBreakerOptions);
+    
+    // Add event listeners
+    breaker.on('open', () => {
+      logger.warn('Claude API circuit breaker opened');
+    });
+    
+    breaker.on('halfOpen', () => {
+      logger.info('Claude API circuit breaker half-open, testing...');
+    });
+
+    return breaker.fire();
+  }
+
+  sanitizeError(error) {
+    const sanitized = {
+      status: error.response?.status,
+      code: error.code,
+      timestamp: new Date().toISOString()
+    };
+    
+    // Only include safe error details
+    if (error.response?.data?.error?.type) {
+      sanitized.errorType = error.response.data.error.type;
+    }
+    
+    return sanitized;
+  }
+
+  createJobAnalysisPrompt(description, requirements) {
+    // Validate and sanitize inputs
+    const sanitizedDescription = this.sanitizeInput(description);
+    const sanitizedRequirements = this.sanitizeInput(requirements);
+    
+    return `You are an expert job analysis system. Analyze the following job description and extract structured information.
 
 JOB DESCRIPTION:
-${description}
+${sanitizedDescription}
 
-${requirements ? `REQUIREMENTS:\n${requirements}` : ''}
+${sanitizedRequirements ? `REQUIREMENTS:\n${sanitizedRequirements}` : ''}
 
 Please analyze this job posting and return a JSON response with the following structure:
 {
@@ -63,24 +201,24 @@ Focus on:
 5. Identify technical skills, tools, frameworks, and soft skills
 6. Extract experience requirements and education level
 
-Return only valid JSON without any additional text or formatting.
-`;
+Return only valid JSON without any additional text or formatting.`;
+  }
 
-    const response = await claudeAPI.post('/v1/messages', {
-      model: 'claude-3-sonnet-20240229',
-      max_tokens: 2000,
-      temperature: 0.1,
-      messages: [
-        {
-          role: 'user',
-          content: prompt
-        }
-      ]
-    });
-
-    const content = response.data.content[0].text;
+  sanitizeInput(input) {
+    if (!input) return '';
     
+    // Remove potential prompt injection attempts
+    return input
+      .replace(/\[INST\]/gi, '')
+      .replace(/\[\/INST\]/gi, '')
+      .replace(/Human:/gi, '')
+      .replace(/Assistant:/gi, '')
+      .substring(0, 10000); // Limit length
+  }
+
+  parseJobAnalysisResponse(data) {
     try {
+      const content = data.content[0].text;
       const analysis = JSON.parse(content);
       
       // Validate and clean the response
@@ -91,17 +229,41 @@ Return only valid JSON without any additional text or formatting.
       };
     } catch (parseError) {
       logger.error('Failed to parse Claude response:', parseError);
-      // Fallback to basic keyword extraction
-      return await fallbackJobAnalysis(description, requirements);
+      throw new ServiceError('Failed to parse AI response', 'PARSE_ERROR');
     }
+  }
+}
+
+class ServiceError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+    this.isOperational = true;
+  }
+}
+
+// Create singleton instance
+const secureClaudeService = new SecureClaudeService();
+
+// Analyze job description with Claude AI
+const analyzeJobWithClaude = async (description, requirements = '') => {
+  try {
+    if (!secureClaudeService.apiKey) {
+      throw new Error('Claude API key not configured');
+    }
+
+    return await secureClaudeService.analyzeJobWithCircuitBreaker(description, requirements);
 
   } catch (error) {
     logger.error('Claude API error:', error);
     
-    if (error.response?.status === 429) {
+    if (error.code === 'RATE_LIMITED') {
       throw new Error('Claude API rate limit exceeded');
-    } else if (error.response?.status === 401) {
+    } else if (error.code === 'AUTH_ERROR') {
       throw new Error('Claude API authentication failed');
+    } else if (error.code === 'SERVICE_ERROR') {
+      // Fallback to basic keyword extraction
+      return await fallbackJobAnalysis(description, requirements);
     } else {
       throw new Error(`Claude API error: ${error.message}`);
     }

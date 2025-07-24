@@ -1,206 +1,180 @@
 const PDFDocument = require('pdfkit');
+const { Worker } = require('worker_threads');
+const Bull = require('bull');
+const os = require('os');
 const logger = require('./logger');
 
-// Generate ATS-compatible PDF from resume data
-const generateATSPDF = async (resumeData) => {
-  return new Promise((resolve, reject) => {
-    try {
-      const doc = new PDFDocument({
-        size: 'A4',
-        margins: {
-          top: 50,
-          bottom: 50,
-          left: 50,
-          right: 50
-        }
+class PDFGenerationService {
+  constructor() {
+    this.workerPool = [];
+    this.queue = new Bull('pdf-generation', {
+      redis: process.env.REDIS_URL || 'redis://localhost:6379'
+    });
+    
+    this.initializeWorkers();
+    this.setupQueueProcessor();
+  }
+
+  initializeWorkers() {
+    const workerCount = Math.max(2, Math.floor(os.cpus().length / 2));
+    
+    for (let i = 0; i < workerCount; i++) {
+      const worker = new Worker('./src/utils/workers/pdfWorker.js');
+      
+      worker.on('error', (error) => {
+        logger.error('PDF worker error', { error: error.message });
+        this.replaceWorker(worker);
       });
-
-      const buffers = [];
-      doc.on('data', buffers.push.bind(buffers));
-      doc.on('end', () => {
-        const pdfBuffer = Buffer.concat(buffers);
-        resolve(pdfBuffer);
+      
+      this.workerPool.push({
+        worker,
+        busy: false
       });
-
-      // ATS-friendly formatting rules
-      const fonts = {
-        regular: 'Helvetica',
-        bold: 'Helvetica-Bold'
-      };
-
-      let yPosition = 50;
-
-      // Header - Contact Information
-      if (resumeData.personal) {
-        doc.font(fonts.bold).fontSize(18);
-        doc.text(resumeData.personal.name || 'Name Not Available', 50, yPosition);
-        yPosition += 25;
-
-        doc.font(fonts.regular).fontSize(10);
-        const contactInfo = [];
-        if (resumeData.personal.email) contactInfo.push(resumeData.personal.email);
-        if (resumeData.personal.phone) contactInfo.push(resumeData.personal.phone);
-        if (resumeData.personal.linkedin) contactInfo.push(resumeData.personal.linkedin);
-        
-        if (contactInfo.length > 0) {
-          doc.text(contactInfo.join(' | '), 50, yPosition);
-          yPosition += 15;
-        }
-
-        if (resumeData.personal.address) {
-          doc.text(resumeData.personal.address, 50, yPosition);
-          yPosition += 15;
-        }
-
-        yPosition += 10;
-      }
-
-      // Professional Experience Section
-      if (resumeData.experience && resumeData.experience.length > 0) {
-        doc.font(fonts.bold).fontSize(14);
-        doc.text('PROFESSIONAL EXPERIENCE', 50, yPosition);
-        yPosition += 20;
-
-        resumeData.experience.forEach(job => {
-          // Job title and company
-          doc.font(fonts.bold).fontSize(11);
-          const jobHeader = `${job.title || 'Position'}${job.company ? ` - ${job.company}` : ''}`;
-          doc.text(jobHeader, 50, yPosition);
-          
-          // Dates
-          if (job.startDate || job.endDate) {
-            const dates = `${job.startDate || ''} - ${job.endDate || 'Present'}`;
-            doc.text(dates, 400, yPosition);
-          }
-          
-          yPosition += 15;
-
-          // Job description and achievements
-          doc.font(fonts.regular).fontSize(10);
-          
-          if (job.description) {
-            doc.text(job.description, 50, yPosition, { width: 500 });
-            yPosition += doc.heightOfString(job.description, { width: 500 }) + 5;
-          }
-
-          if (job.achievements && job.achievements.length > 0) {
-            job.achievements.forEach(achievement => {
-              doc.text(`• ${achievement}`, 50, yPosition, { width: 500 });
-              yPosition += doc.heightOfString(`• ${achievement}`, { width: 500 }) + 3;
-            });
-          }
-
-          yPosition += 10;
-
-          // Check if we need a new page
-          if (yPosition > 700) {
-            doc.addPage();
-            yPosition = 50;
-          }
-        });
-
-        yPosition += 10;
-      }
-
-      // Education Section
-      if (resumeData.education && resumeData.education.length > 0) {
-        // Check if we need a new page
-        if (yPosition > 650) {
-          doc.addPage();
-          yPosition = 50;
-        }
-
-        doc.font(fonts.bold).fontSize(14);
-        doc.text('EDUCATION', 50, yPosition);
-        yPosition += 20;
-
-        resumeData.education.forEach(edu => {
-          doc.font(fonts.bold).fontSize(11);
-          const eduHeader = `${edu.degree || 'Degree'}${edu.field ? ` in ${edu.field}` : ''}`;
-          doc.text(eduHeader, 50, yPosition);
-          
-          if (edu.graduationDate) {
-            doc.text(edu.graduationDate, 400, yPosition);
-          }
-          
-          yPosition += 15;
-
-          if (edu.institution) {
-            doc.font(fonts.regular).fontSize(10);
-            doc.text(edu.institution, 50, yPosition);
-            yPosition += 12;
-          }
-
-          if (edu.gpa) {
-            doc.font(fonts.regular).fontSize(10);
-            doc.text(`GPA: ${edu.gpa}`, 50, yPosition);
-            yPosition += 12;
-          }
-
-          yPosition += 8;
-        });
-
-        yPosition += 10;
-      }
-
-      // Skills Section
-      if (resumeData.skills && resumeData.skills.technical && resumeData.skills.technical.length > 0) {
-        // Check if we need a new page
-        if (yPosition > 650) {
-          doc.addPage();
-          yPosition = 50;
-        }
-
-        doc.font(fonts.bold).fontSize(14);
-        doc.text('TECHNICAL SKILLS', 50, yPosition);
-        yPosition += 20;
-
-        doc.font(fonts.regular).fontSize(10);
-        const skillsText = resumeData.skills.technical.join(', ');
-        doc.text(skillsText, 50, yPosition, { width: 500 });
-        yPosition += doc.heightOfString(skillsText, { width: 500 }) + 15;
-      }
-
-      // Certifications Section
-      if (resumeData.certifications && resumeData.certifications.length > 0) {
-        // Check if we need a new page
-        if (yPosition > 650) {
-          doc.addPage();
-          yPosition = 50;
-        }
-
-        doc.font(fonts.bold).fontSize(14);
-        doc.text('CERTIFICATIONS', 50, yPosition);
-        yPosition += 20;
-
-        resumeData.certifications.forEach(cert => {
-          doc.font(fonts.bold).fontSize(10);
-          doc.text(cert.name || 'Certification', 50, yPosition);
-          
-          if (cert.date) {
-            doc.text(cert.date, 400, yPosition);
-          }
-          
-          yPosition += 12;
-
-          if (cert.issuer) {
-            doc.font(fonts.regular).fontSize(9);
-            doc.text(cert.issuer, 50, yPosition);
-            yPosition += 10;
-          }
-
-          yPosition += 5;
-        });
-      }
-
-      // Finalize PDF
-      doc.end();
-
-    } catch (error) {
-      logger.error('PDF generation error:', error);
-      reject(new Error(`PDF generation failed: ${error.message}`));
     }
-  });
+  }
+
+  setupQueueProcessor() {
+    this.queue.process('generate-pdf', async (job) => {
+      const { resumeId, userId, options } = job.data;
+      
+      try {
+        // Check cache first
+        const cached = await this.checkCache(resumeId);
+        if (cached) {
+          return cached;
+        }
+        
+        // Get resume data (this would come from database)
+        const resumeData = job.data.resumeData;
+        
+        // Generate PDF
+        const result = await this.generatePDFAsync(resumeData, options);
+        
+        // Cache result
+        await this.cacheResult(resumeId, result);
+        
+        // Update job progress
+        job.progress(100);
+        
+        return result;
+        
+      } catch (error) {
+        logger.error('PDF generation failed', {
+          jobId: job.id,
+          error: error.message
+        });
+        throw error;
+      }
+    });
+  }
+
+  async generatePDFAsync(resumeData, options) {
+    return new Promise((resolve, reject) => {
+      // Get available worker
+      const workerInfo = this.getAvailableWorker();
+      if (!workerInfo) {
+        return reject(new Error('No workers available'));
+      }
+      
+      workerInfo.busy = true;
+      const { worker } = workerInfo;
+      
+      // Setup message handlers
+      const messageHandler = (message) => {
+        switch (message.type) {
+          case 'progress':
+            // Could emit progress events here
+            break;
+            
+          case 'complete':
+            worker.off('message', messageHandler);
+            workerInfo.busy = false;
+            resolve({
+              buffer: Buffer.from(message.data),
+              metadata: message.metadata
+            });
+            break;
+            
+          case 'error':
+            worker.off('message', messageHandler);
+            workerInfo.busy = false;
+            reject(new Error(message.error));
+            break;
+        }
+      };
+      
+      worker.on('message', messageHandler);
+      
+      // Send generation request
+      worker.postMessage({
+        type: 'generate',
+        resumeData,
+        options
+      });
+      
+      // Timeout protection
+      setTimeout(() => {
+        worker.off('message', messageHandler);
+        workerInfo.busy = false;
+        reject(new Error('PDF generation timeout'));
+      }, 30000);
+    });
+  }
+
+  getAvailableWorker() {
+    return this.workerPool.find(w => !w.busy);
+  }
+
+  async checkCache(resumeId) {
+    // Implementation would check Redis cache
+    return null;
+  }
+
+  async cacheResult(resumeId, result) {
+    // Implementation would cache in Redis
+  }
+
+  replaceWorker(failedWorker) {
+    const index = this.workerPool.findIndex(w => w.worker === failedWorker);
+    if (index !== -1) {
+      failedWorker.terminate();
+      
+      const newWorker = new Worker('./src/utils/workers/pdfWorker.js');
+      newWorker.on('error', (error) => {
+        logger.error('PDF worker error', { error: error.message });
+        this.replaceWorker(newWorker);
+      });
+      
+      this.workerPool[index] = {
+        worker: newWorker,
+        busy: false
+      };
+    }
+  }
+}
+
+// Create singleton instance
+const pdfGenerationService = new PDFGenerationService();
+
+// Generate ATS-compatible PDF from resume data
+const generateATSPDF = async (resumeData, options = {}) => {
+  try {
+    // Add job to queue
+    const job = await pdfGenerationService.queue.add('generate-pdf', {
+      resumeData,
+      options,
+      resumeId: options.resumeId || 'temp',
+      userId: options.userId || 'anonymous'
+    });
+    
+    // Wait for completion
+    const result = await job.finished();
+    return result.buffer;
+    
+  } catch (error) {
+    logger.error('PDF generation error:', error);
+    throw new Error(`PDF generation failed: ${error.message}`);
+  }
 };
 
 // Validate ATS compatibility

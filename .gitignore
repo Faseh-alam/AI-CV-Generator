@@ -127,3 +127,8 @@ docker-compose.yml
 
 # Local development
 .local/
+
+# Security keys
+keys/
+*.key
+*.pem

@@ -1,46 +1,61 @@
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { getDB } = require('../config/database');
 const logger = require('../utils/logger');
 const { validateRegister, validateLogin } = require('../utils/validation');
+const TokenService = require('../services/tokenService');
 
-// Generate JWT Token
-const signToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-  });
-};
+const tokenService = new TokenService();
 
-// Send token response
-const sendTokenResponse = (user, statusCode, res) => {
-  const token = signToken(user.id);
+// Send token response with new token structure
+const sendTokenResponse = async (user, statusCode, res) => {
+  try {
+    const { accessToken, refreshToken } = await tokenService.generateTokenPair(user.id);
 
-  const options = {
-    expires: new Date(
-      Date.now() + (process.env.JWT_COOKIE_EXPIRE || 7) * 24 * 60 * 60 * 1000
-    ),
-    httpOnly: true,
-  };
+    // Set secure HTTP-only cookies
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict'
+    };
 
-  if (process.env.NODE_ENV === 'production') {
-    options.secure = true;
-  }
+    // Access token cookie (15 minutes)
+    res.cookie('accessToken', accessToken, {
+      ...cookieOptions,
+      maxAge: 15 * 60 * 1000 // 15 minutes
+    });
 
-  res.status(statusCode).cookie('token', token, options).json({
-    success: true,
-    data: {
-      user: {
-        id: user.id,
-        email: user.email,
-        firstName: user.first_name,
-        lastName: user.last_name,
-        subscriptionTier: user.subscription_tier,
-        subscriptionStatus: user.subscription_status
+    // Refresh token cookie (7 days)
+    res.cookie('refreshToken', refreshToken, {
+      ...cookieOptions,
+      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    });
+
+    res.status(statusCode).json({
+      success: true,
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          firstName: user.first_name,
+          lastName: user.last_name,
+          subscriptionTier: user.subscription_tier,
+          subscriptionStatus: user.subscription_status
+        },
+        accessToken, // Also send in response for API clients
+        expiresIn: 900 // 15 minutes in seconds
       },
-      token,
-    },
-  });
+    });
+  } catch (error) {
+    logger.error('Token generation failed:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'TOKEN_GENERATION_ERROR',
+        message: 'Failed to generate authentication tokens'
+      }
+    });
+  }
 };
 
 // @desc    Register user
@@ -168,19 +183,45 @@ const login = async (req, res, next) => {
   }
 };
 
-// @desc    Log user out / clear cookie
+// @desc    Log user out / clear cookies and revoke tokens
 // @route   POST /api/v1/auth/logout
 // @access  Private
 const logout = async (req, res, next) => {
-  res.cookie('token', 'none', {
-    expires: new Date(Date.now() + 10 * 1000),
-    httpOnly: true,
-  });
+  try {
+    const accessToken = req.headers.authorization?.split(' ')[1] || req.cookies?.accessToken;
+    const refreshToken = req.cookies?.refreshToken;
 
-  res.status(200).json({
-    success: true,
-    data: {}
-  });
+    // Revoke tokens
+    if (accessToken || refreshToken) {
+      await tokenService.logout(accessToken, refreshToken);
+    }
+
+    // Clear cookies
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict'
+    };
+
+    res.clearCookie('accessToken', cookieOptions);
+    res.clearCookie('refreshToken', cookieOptions);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        message: 'Logged out successfully'
+      }
+    });
+  } catch (error) {
+    logger.error('Logout error:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'LOGOUT_ERROR',
+        message: 'Error during logout'
+      }
+    });
+  }
 };
 
 // @desc    Get current logged in user
@@ -325,6 +366,73 @@ const resetPassword = async (req, res, next) => {
   }
 };
 
+// @desc    Refresh access token
+// @route   POST /api/v1/auth/refresh
+// @access  Public (requires refresh token)
+const refreshToken = async (req, res, next) => {
+  try {
+    const refreshToken = req.cookies?.refreshToken || req.body.refreshToken;
+
+    if (!refreshToken) {
+      return res.status(401).json({
+        success: false,
+        error: {
+          code: 'NO_REFRESH_TOKEN',
+          message: 'Refresh token required'
+        }
+      });
+    }
+
+    // Generate new token pair
+    const { accessToken, refreshToken: newRefreshToken } = await tokenService.refreshTokens(refreshToken);
+
+    // Set new cookies
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict'
+    };
+
+    res.cookie('accessToken', accessToken, {
+      ...cookieOptions,
+      maxAge: 15 * 60 * 1000 // 15 minutes
+    });
+
+    res.cookie('refreshToken', newRefreshToken, {
+      ...cookieOptions,
+      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        accessToken,
+        expiresIn: 900 // 15 minutes in seconds
+      }
+    });
+  } catch (error) {
+    logger.error('Token refresh error:', error);
+    
+    // Clear cookies on refresh failure
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict'
+    };
+
+    res.clearCookie('accessToken', cookieOptions);
+    res.clearCookie('refreshToken', cookieOptions);
+
+    res.status(401).json({
+      success: false,
+      error: {
+        code: 'REFRESH_TOKEN_INVALID',
+        message: 'Invalid or expired refresh token'
+      }
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -332,4 +440,5 @@ module.exports = {
   getMe,
   forgotPassword,
   resetPassword,
+  refreshToken,
 };

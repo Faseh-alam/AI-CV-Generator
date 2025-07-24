@@ -1,37 +1,404 @@
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
+const { Transform } = require('stream');
+const { LRUCache } = require('lru-cache');
+const crypto = require('crypto');
 const logger = require('./logger');
+
+class StreamingResumeParser {
+  constructor() {
+    this.parserCache = new LRUCache({
+      max: 100,
+      ttl: 1000 * 60 * 60, // 1 hour
+      updateAgeOnGet: true,
+      sizeCalculation: (value) => JSON.stringify(value).length
+    });
+    
+    this.nlpProcessor = new NLPProcessor();
+  }
+
+  async parseResumeStream(fileStream, mimeType, options = {}) {
+    const parseId = crypto.randomBytes(16).toString('hex');
+    
+    try {
+      // Check cache first
+      const cacheKey = await this.generateCacheKey(fileStream);
+      const cached = this.parserCache.get(cacheKey);
+      
+      if (cached && !options.forceReparse) {
+        logger.info('Resume parse cache hit', { parseId });
+        return cached;
+      }
+      
+      // Select appropriate parser
+      const parser = this.selectParser(mimeType);
+      
+      // Parse with progress tracking
+      const result = await this.parseWithProgress(
+        fileStream,
+        parser,
+        parseId,
+        options
+      );
+      
+      // Cache successful parse
+      this.parserCache.set(cacheKey, result);
+      
+      return result;
+      
+    } catch (error) {
+      logger.error('Resume parsing failed', {
+        parseId,
+        error: error.message
+      });
+      
+      throw new ParsingError(
+        'Failed to parse resume',
+        'PARSE_ERROR',
+        { parseId }
+      );
+    }
+  }
+
+  selectParser(mimeType) {
+    const parsers = {
+      'application/pdf': this.createPDFStreamParser.bind(this),
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 
+        this.createDocxStreamParser.bind(this),
+      'text/plain': this.createTextStreamParser.bind(this)
+    };
+    
+    const parser = parsers[mimeType];
+    if (!parser) {
+      throw new ParsingError('Unsupported file type', 'UNSUPPORTED_TYPE');
+    }
+    
+    return parser;
+  }
+
+  createPDFStreamParser() {
+    return new Transform({
+      objectMode: true,
+      async transform(chunk, encoding, callback) {
+        try {
+          // Accumulate chunks for PDF parsing
+          if (!this.chunks) this.chunks = [];
+          this.chunks.push(chunk);
+          
+          callback();
+        } catch (error) {
+          callback(error);
+        }
+      },
+      
+      async flush(callback) {
+        try {
+          const buffer = Buffer.concat(this.chunks);
+          const data = await pdfParse(buffer, {
+            max: 10, // Max pages to prevent abuse
+            version: 'v2.0.550'
+          });
+          
+          this.push({
+            text: data.text,
+            pages: data.numpages,
+            info: data.info
+          });
+          
+          callback();
+        } catch (error) {
+          callback(error);
+        }
+      }
+    });
+  }
+
+  createDocxStreamParser() {
+    return new Transform({
+      objectMode: true,
+      async transform(chunk, encoding, callback) {
+        if (!this.chunks) this.chunks = [];
+        this.chunks.push(chunk);
+        callback();
+      },
+      
+      async flush(callback) {
+        try {
+          const buffer = Buffer.concat(this.chunks);
+          
+          // Extract text with style information
+          const result = await mammoth.convertToHtml({
+            buffer,
+            styleMap: [
+              "p[style-name='Heading 1'] => h1",
+              "p[style-name='Heading 2'] => h2"
+            ]
+          });
+          
+          // Also get raw text
+          const textResult = await mammoth.extractRawText({ buffer });
+          
+          this.push({
+            text: textResult.value,
+            html: result.value,
+            messages: result.messages
+          });
+          
+          callback();
+        } catch (error) {
+          callback(error);
+        }
+      }
+    });
+  }
+
+  createTextStreamParser() {
+    return new Transform({
+      objectMode: true,
+      transform(chunk, encoding, callback) {
+        if (!this.textChunks) this.textChunks = [];
+        this.textChunks.push(chunk);
+        callback();
+      },
+      
+      flush(callback) {
+        const text = Buffer.concat(this.textChunks).toString('utf-8');
+        this.push({ text });
+        callback();
+      }
+    });
+  }
+
+  async parseWithProgress(fileStream, parserFactory, parseId, options) {
+    return new Promise((resolve, reject) => {
+      const parser = parserFactory();
+      const results = [];
+      
+      // Progress tracking
+      let bytesProcessed = 0;
+      const progressInterval = setInterval(() => {
+        this.emitProgress(parseId, bytesProcessed);
+      }, 100);
+      
+      // Setup pipeline
+      fileStream
+        .on('data', (chunk) => {
+          bytesProcessed += chunk.length;
+        })
+        .pipe(parser)
+        .on('data', (data) => {
+          results.push(data);
+        })
+        .on('end', async () => {
+          clearInterval(progressInterval);
+          
+          try {
+            // Extract structured data
+            const text = results.map(r => r.text).join('\n');
+            const structuredData = await this.extractStructuredData(
+              text,
+              options
+            );
+            
+            // Calculate parsing accuracy
+            const accuracy = this.calculateParsingAccuracy(structuredData);
+            
+            resolve({
+              ...structuredData,
+              originalText: text,
+              accuracy,
+              metadata: {
+                parseId,
+                bytesProcessed,
+                timestamp: new Date().toISOString()
+              }
+            });
+          } catch (error) {
+            reject(error);
+          }
+        })
+        .on('error', (error) => {
+          clearInterval(progressInterval);
+          reject(error);
+        });
+    });
+  }
+
+  async extractStructuredData(text, options) {
+    // Use NLP for better extraction
+    const sections = await this.nlpProcessor.identifySections(text);
+    
+    const extractors = {
+      personal: this.extractPersonalInfo.bind(this),
+      experience: this.extractExperience.bind(this),
+      education: this.extractEducation.bind(this),
+      skills: this.extractSkills.bind(this),
+      certifications: this.extractCertifications.bind(this)
+    };
+    
+    const results = {};
+    
+    // Parallel extraction for performance
+    await Promise.all(
+      Object.entries(extractors).map(async ([key, extractor]) => {
+        try {
+          results[key] = await extractor(
+            sections[key] || text,
+            options
+          );
+        } catch (error) {
+          logger.warn(`Failed to extract ${key}`, { error: error.message });
+          results[key] = null;
+        }
+      })
+    );
+    
+    return results;
+  }
+
+  async generateCacheKey(fileStream) {
+    // Generate cache key based on file content hash
+    const hash = crypto.createHash('sha256');
+    
+    return new Promise((resolve, reject) => {
+      fileStream.on('data', chunk => hash.update(chunk));
+      fileStream.on('end', () => resolve(hash.digest('hex')));
+      fileStream.on('error', reject);
+    });
+  }
+
+  calculateParsingAccuracy(data) {
+    let score = 0;
+    let maxScore = 0;
+    
+    // Check completeness of each section
+    const checks = {
+      'personal.name': 20,
+      'personal.email': 15,
+      'personal.phone': 10,
+      'experience': 25,
+      'education': 15,
+      'skills': 15
+    };
+    
+    for (const [path, weight] of Object.entries(checks)) {
+      maxScore += weight;
+      
+      const value = path.split('.').reduce((obj, key) => obj?.[key], data);
+      if (value && (Array.isArray(value) ? value.length > 0 : true)) {
+        score += weight;
+      }
+    }
+    
+    return Math.round((score / maxScore) * 100);
+  }
+
+  emitProgress(parseId, bytesProcessed) {
+    // Emit to websocket or event emitter
+    process.emit('parse:progress', {
+      parseId,
+      bytesProcessed,
+      timestamp: Date.now()
+    });
+  }
+
+  // Enhanced extraction methods using the existing logic
+  extractPersonalInfo(text, options) {
+    return extractPersonalInfo(text, text.split('\n'));
+  }
+
+  extractExperience(text, options) {
+    return extractExperience(text, text.split('\n'));
+  }
+
+  extractEducation(text, options) {
+    return extractEducation(text, text.split('\n'));
+  }
+
+  extractSkills(text, options) {
+    return extractSkills(text, text.split('\n'));
+  }
+
+  extractCertifications(text, options) {
+    return extractCertifications(text, text.split('\n'));
+  }
+}
+
+class NLPProcessor {
+  constructor() {
+    // Initialize NLP model (using compromise for now)
+    this.nlp = require('compromise');
+  }
+
+  async identifySections(text) {
+    const sections = {};
+    const lines = text.split('\n');
+    
+    const sectionHeaders = {
+      experience: /^(work\s+)?experience|employment|professional\s+background/i,
+      education: /^education|academic|qualifications/i,
+      skills: /^skills|competencies|technical\s+skills/i,
+      certifications: /^certifications?|licenses?|credentials/i
+    };
+    
+    let currentSection = 'personal';
+    let sectionContent = [];
+    
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      
+      // Check if this line is a section header
+      let newSection = null;
+      for (const [section, regex] of Object.entries(sectionHeaders)) {
+        if (regex.test(trimmedLine)) {
+          newSection = section;
+          break;
+        }
+      }
+      
+      if (newSection) {
+        // Save previous section
+        sections[currentSection] = sectionContent.join('\n');
+        currentSection = newSection;
+        sectionContent = [];
+      } else {
+        sectionContent.push(line);
+      }
+    }
+    
+    // Save last section
+    sections[currentSection] = sectionContent.join('\n');
+    
+    return sections;
+  }
+}
+
+class ParsingError extends Error {
+  constructor(message, code, details = {}) {
+    super(message);
+    this.code = code;
+    this.details = details;
+    this.isOperational = true;
+  }
+}
+
+// Create singleton instance
+const streamingResumeParser = new StreamingResumeParser();
 
 // Parse resume file based on type
 const parseResumeFile = async (file) => {
   try {
-    let text = '';
+    // Convert buffer to stream for streaming parser
+    const { Readable } = require('stream');
+    const fileStream = Readable.from(file.buffer);
     
-    switch (file.mimetype) {
-      case 'application/pdf':
-        text = await parsePDF(file.buffer);
-        break;
-      case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        text = await parseDocx(file.buffer);
-        break;
-      case 'application/msword':
-        text = await parseDoc(file.buffer);
-        break;
-      case 'text/plain':
-        text = file.buffer.toString('utf-8');
-        break;
-      default:
-        throw new Error('Unsupported file type');
-    }
-
-    // Extract structured data from text
-    const parsedData = await extractStructuredData(text);
+    const result = await streamingResumeParser.parseResumeStream(
+      fileStream,
+      file.mimetype
+    );
     
-    return {
-      ...parsedData,
-      originalText: text,
-      accuracy: calculateParsingAccuracy(parsedData)
-    };
+    return result;
+    
   } catch (error) {
     logger.error('Resume parsing error:', error);
     throw new Error(`Failed to parse resume: ${error.message}`);
