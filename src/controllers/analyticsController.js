@@ -1,6 +1,10 @@
 const { getDB } = require('../config/database');
 const logger = require('../utils/logger');
 const { validateApplication } = require('../utils/validation');
+const CacheService = require('../services/cacheService');
+
+// Initialize cache service
+const cacheService = new CacheService();
 
 // @desc    Get user dashboard data
 // @route   GET /api/v1/analytics/dashboard
@@ -10,67 +14,85 @@ const getUserDashboard = async (req, res) => {
     const userId = req.user.id;
     const db = getDB();
 
+    // Check cache first
+    const cacheKey = cacheService.generateKey('userDashboard', userId);
+    const cachedDashboard = await cacheService.get(cacheKey);
+    
+    if (cachedDashboard) {
+      return res.status(200).json({
+        success: true,
+        data: cachedDashboard,
+        fromCache: true
+      });
+    }
+
     // Get current month stats
     const currentMonth = new Date();
     const firstDayOfMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
 
-    // Get optimization count for current month
-    const optimizationResult = await db.query(
-      'SELECT COUNT(*) as count FROM optimizations WHERE user_id = $1 AND created_at >= $2',
-      [userId, firstDayOfMonth]
-    );
-
-    // Get average match score improvement
-    const matchScoreResult = await db.query(
-      `SELECT AVG(optimized_match_score - original_match_score) as avg_improvement,
-              AVG(optimized_match_score) as avg_optimized_score
-       FROM optimizations 
-       WHERE user_id = $1 AND status = 'completed' AND created_at >= $2`,
-      [userId, firstDayOfMonth]
-    );
-
-    // Get application count for current month
-    const applicationResult = await db.query(
-      'SELECT COUNT(*) as count FROM applications WHERE user_id = $1 AND application_date >= $2',
-      [userId, firstDayOfMonth]
-    );
-
-    // Get recent optimizations
-    const recentOptimizations = await db.query(
-      `SELECT o.id, o.original_match_score, o.optimized_match_score, o.status, o.created_at,
-              r.name as resume_name, j.title as job_title, j.company
-       FROM optimizations o
-       JOIN resumes r ON o.resume_id = r.id
-       JOIN job_descriptions j ON o.job_description_id = j.id
-       WHERE o.user_id = $1
-       ORDER BY o.created_at DESC
-       LIMIT 5`,
-      [userId]
-    );
-
-    // Get subscription info
-    const subscriptionResult = await db.query(
-      'SELECT subscription_tier, subscription_status FROM users WHERE id = $1',
-      [userId]
-    );
+    // Execute all queries in parallel for better performance
+    const [
+      optimizationResult,
+      matchScoreResult,
+      applicationResult,
+      recentOptimizations,
+      subscriptionResult
+    ] = await Promise.all([
+      db.query(
+        'SELECT COUNT(*) as count FROM optimizations WHERE user_id = $1 AND created_at >= $2',
+        [userId, firstDayOfMonth]
+      ),
+      db.query(
+        `SELECT AVG(optimized_match_score - original_match_score) as avg_improvement,
+                AVG(optimized_match_score) as avg_optimized_score
+         FROM optimizations 
+         WHERE user_id = $1 AND status = 'completed' AND created_at >= $2`,
+        [userId, firstDayOfMonth]
+      ),
+      db.query(
+        'SELECT COUNT(*) as count FROM applications WHERE user_id = $1 AND application_date >= $2',
+        [userId, firstDayOfMonth]
+      ),
+      db.query(
+        `SELECT o.id, o.original_match_score, o.optimized_match_score, o.status, o.created_at,
+                r.name as resume_name, j.title as job_title, j.company
+         FROM optimizations o
+         JOIN resumes r ON o.resume_id = r.id
+         JOIN job_descriptions j ON o.job_description_id = j.id
+         WHERE o.user_id = $1
+         ORDER BY o.created_at DESC
+         LIMIT 5`,
+        [userId]
+      ),
+      db.query(
+        'SELECT subscription_tier, subscription_status FROM users WHERE id = $1',
+        [userId]
+      )
+    ]);
 
     const user = subscriptionResult.rows[0];
+    const dashboardData = {
+      currentMonth: {
+        optimizations: parseInt(optimizationResult.rows[0].count),
+        avgMatchScore: Math.round(matchScoreResult.rows[0].avg_optimized_score || 0),
+        avgImprovement: Math.round(matchScoreResult.rows[0].avg_improvement || 0),
+        applications: parseInt(applicationResult.rows[0].count)
+      },
+      recentOptimizations: recentOptimizations.rows,
+      subscription: {
+        tier: user.subscription_tier,
+        status: user.subscription_status
+      }
+    };
+
+    // Cache the dashboard data
+    await cacheService.set(cacheKey, dashboardData, {
+      ttl: cacheService.ttlStrategies.userStats
+    });
 
     res.status(200).json({
       success: true,
-      data: {
-        currentMonth: {
-          optimizations: parseInt(optimizationResult.rows[0].count),
-          avgMatchScore: Math.round(matchScoreResult.rows[0].avg_optimized_score || 0),
-          avgImprovement: Math.round(matchScoreResult.rows[0].avg_improvement || 0),
-          applications: parseInt(applicationResult.rows[0].count)
-        },
-        recentOptimizations: recentOptimizations.rows,
-        subscription: {
-          tier: user.subscription_tier,
-          status: user.subscription_status
-        }
-      }
+      data: dashboardData
     });
   } catch (error) {
     logger.error('Get dashboard error:', error);
@@ -93,45 +115,62 @@ const getUsageStats = async (req, res) => {
     const { period = '30' } = req.query; // days
     const db = getDB();
 
+    // Check cache first
+    const cacheKey = cacheService.generateKey('usageStats', userId, period);
+    const cachedStats = await cacheService.get(cacheKey);
+    
+    if (cachedStats) {
+      return res.status(200).json({
+        success: true,
+        data: cachedStats,
+        fromCache: true
+      });
+    }
+
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - parseInt(period));
 
-    // Get usage by action type
-    const usageResult = await db.query(
-      `SELECT action, COUNT(*) as count, DATE(timestamp) as date
-       FROM usage_tracking 
-       WHERE user_id = $1 AND timestamp >= $2
-       GROUP BY action, DATE(timestamp)
-       ORDER BY date DESC`,
-      [userId, startDate]
-    );
+    // Execute queries in parallel
+    const [usageResult, totalResult, optimizationStats] = await Promise.all([
+      db.query(
+        `SELECT action, COUNT(*) as count, DATE(timestamp) as date
+         FROM usage_tracking 
+         WHERE user_id = $1 AND timestamp >= $2
+         GROUP BY action, DATE(timestamp)
+         ORDER BY date DESC`,
+        [userId, startDate]
+      ),
+      db.query(
+        `SELECT action, COUNT(*) as total
+         FROM usage_tracking 
+         WHERE user_id = $1 AND timestamp >= $2
+         GROUP BY action`,
+        [userId, startDate]
+      ),
+      db.query(
+        `SELECT status, COUNT(*) as count
+         FROM optimizations 
+         WHERE user_id = $1 AND created_at >= $2
+         GROUP BY status`,
+        [userId, startDate]
+      )
+    ]);
 
-    // Get total counts
-    const totalResult = await db.query(
-      `SELECT action, COUNT(*) as total
-       FROM usage_tracking 
-       WHERE user_id = $1 AND timestamp >= $2
-       GROUP BY action`,
-      [userId, startDate]
-    );
+    const statsData = {
+      period: `${period} days`,
+      dailyUsage: usageResult.rows,
+      totalUsage: totalResult.rows,
+      optimizationStats: optimizationStats.rows
+    };
 
-    // Get optimization success rate
-    const optimizationStats = await db.query(
-      `SELECT status, COUNT(*) as count
-       FROM optimizations 
-       WHERE user_id = $1 AND created_at >= $2
-       GROUP BY status`,
-      [userId, startDate]
-    );
+    // Cache the stats
+    await cacheService.set(cacheKey, statsData, {
+      ttl: cacheService.ttlStrategies.userStats
+    });
 
     res.status(200).json({
       success: true,
-      data: {
-        period: `${period} days`,
-        dailyUsage: usageResult.rows,
-        totalUsage: totalResult.rows,
-        optimizationStats: optimizationStats.rows
-      }
+      data: statsData
     });
   } catch (error) {
     logger.error('Get usage stats error:', error);

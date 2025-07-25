@@ -1,21 +1,43 @@
 const { getDB } = require('../config/database');
 const logger = require('../utils/logger');
 const { validateOptimization } = require('../utils/validation');
-const { optimizeResumeWithClaude } = require('../utils/claudeAI');
-const { calculateResumeMatchScore } = require('../utils/matchScoreCalculator');
+const WorkerPool = require('../services/workerPool');
+const CacheService = require('../services/cacheService');
+const Bull = require('bull');
+const path = require('path');
+
+// Initialize services
+const cacheService = new CacheService();
+const optimizationQueue = new Bull('optimization processing', {
+  redis: process.env.REDIS_URL || 'redis://localhost:6379'
+});
+
+// Initialize worker pool
+const workerPool = new WorkerPool(
+  path.join(__dirname, '../utils/workers/optimizationWorker.js'),
+  {
+    poolSize: parseInt(process.env.WORKER_THREADS) || 4,
+    maxQueueSize: 1000,
+    workerTimeout: 300000 // 5 minutes
+  }
+);
 
 // @desc    Create optimization
 // @route   POST /api/v1/optimizations
 // @access  Private
 const createOptimization = async (req, res) => {
   try {
-    const { error } = validateOptimization(req.body);
+    const { error } = await validateOptimization(req.body, { 
+      ip: req.ip, 
+      userId: req.user.id 
+    });
+    
     if (error) {
       return res.status(400).json({
         success: false,
         error: {
           code: 'VALIDATION_ERROR',
-          message: error.details[0].message
+          message: error.details?.[0]?.message || error.message
         }
       });
     }
@@ -23,6 +45,21 @@ const createOptimization = async (req, res) => {
     const { resumeId, jobDescriptionId, optimizationLevel = 'balanced' } = req.body;
     const userId = req.user.id;
     const db = getDB();
+
+    // Check cache for existing optimization
+    const cacheKey = cacheService.generateKey('optimization', userId, resumeId, jobDescriptionId, optimizationLevel);
+    const cachedResult = await cacheService.get(cacheKey);
+    
+    if (cachedResult) {
+      logger.info('Optimization cache hit', { userId, resumeId, jobDescriptionId });
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...cachedResult,
+          fromCache: true
+        }
+      });
+    }
 
     // Check if resume exists and belongs to user
     const resumeResult = await db.query(
@@ -59,21 +96,37 @@ const createOptimization = async (req, res) => {
     const resumeData = resumeResult.rows[0].parsed_data;
     const jobKeywords = jobResult.rows[0].parsed_keywords;
 
-    // Calculate original match score
-    const originalMatchScore = await calculateResumeMatchScore(resumeData, jobKeywords);
+    // Calculate original match score using worker
+    const originalMatchScore = await workerPool.runTask('MATCH_SCORE', {
+      resumeData,
+      jobKeywords
+    });
 
     // Create optimization record
     const optimizationResult = await db.query(
       `INSERT INTO optimizations (user_id, resume_id, job_description_id, original_match_score, status) 
        VALUES ($1, $2, $3, $4, $5) 
        RETURNING id, created_at`,
-      [userId, resumeId, jobDescriptionId, originalMatchScore.overallScore, 'processing']
+      [userId, resumeId, jobDescriptionId, originalMatchScore.overallScore, 'queued']
     );
 
     const optimization = optimizationResult.rows[0];
 
-    // Start optimization process asynchronously
-    processOptimization(optimization.id, resumeData, jobKeywords, optimizationLevel, userId);
+    // Add to Bull queue for processing
+    const job = await optimizationQueue.add('process-optimization', {
+      optimizationId: optimization.id,
+      resumeData,
+      jobKeywords,
+      optimizationLevel,
+      userId
+    }, {
+      priority: optimizationLevel === 'aggressive' ? 10 : 5,
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 2000
+      }
+    });
 
     // Track usage
     await db.query(
@@ -81,15 +134,16 @@ const createOptimization = async (req, res) => {
       [userId, 'optimization', optimization.id]
     );
 
-    logger.info(`Optimization started by user ${userId}: ${optimization.id}`);
+    logger.info(`Optimization queued by user ${userId}: ${optimization.id}`);
 
     res.status(201).json({
       success: true,
       data: {
         optimizationId: optimization.id,
-        status: 'processing',
+        jobId: job.id,
+        status: 'queued',
         originalMatchScore: originalMatchScore.overallScore,
-        estimatedTime: 30, // seconds
+        estimatedTime: 45, // seconds
         createdAt: optimization.created_at
       }
     });
@@ -105,20 +159,32 @@ const createOptimization = async (req, res) => {
   }
 };
 
-// Process optimization asynchronously
-const processOptimization = async (optimizationId, resumeData, jobKeywords, optimizationLevel, userId) => {
+// Set up Bull queue processor
+optimizationQueue.process('process-optimization', async (job) => {
+  const { optimizationId, resumeData, jobKeywords, optimizationLevel, userId } = job.data;
   const db = getDB();
   const startTime = Date.now();
 
   try {
-    // Optimize resume with Claude AI
-    const optimizationResult = await optimizeResumeWithClaude(resumeData, jobKeywords, optimizationLevel);
-
-    // Calculate optimized match score
-    const optimizedMatchScore = await calculateResumeMatchScore(
-      optimizationResult.optimizedContent, 
-      jobKeywords
+    // Update status to processing
+    await db.query(
+      'UPDATE optimizations SET status = $1 WHERE id = $2',
+      ['processing', optimizationId]
     );
+
+    // Process optimization using worker pool
+    const result = await workerPool.runTask('OPTIMIZE', {
+      optimizationId,
+      resumeData,
+      jobKeywords,
+      optimizationLevel,
+      userId
+    }, {
+      timeout: 300000, // 5 minutes
+      onProgress: (progress) => {
+        job.progress(progress.progress);
+      }
+    });
 
     const processingTime = Date.now() - startTime;
 
@@ -133,16 +199,31 @@ const processOptimization = async (optimizationId, resumeData, jobKeywords, opti
            completed_at = CURRENT_TIMESTAMP
        WHERE id = $6`,
       [
-        JSON.stringify(optimizationResult.optimizedContent),
-        optimizedMatchScore.overallScore,
-        JSON.stringify(optimizationResult.changes),
+        JSON.stringify(result.optimizedContent),
+        result.optimizedMatchScore,
+        JSON.stringify(result.changes),
         processingTime,
         'completed',
         optimizationId
       ]
     );
 
+    // Cache the result
+    const cacheKey = cacheService.generateKey('optimization', userId, optimizationId);
+    await cacheService.set(cacheKey, {
+      optimizationId,
+      status: 'completed',
+      optimizedContent: result.optimizedContent,
+      optimizedMatchScore: result.optimizedMatchScore,
+      changes: result.changes,
+      processingTime
+    }, {
+      ttl: cacheService.ttlStrategies.optimizationResult
+    });
+
     logger.info(`Optimization completed for user ${userId}: ${optimizationId}`);
+    return result;
+
   } catch (error) {
     logger.error(`Optimization failed for ${optimizationId}:`, error);
 
@@ -151,8 +232,10 @@ const processOptimization = async (optimizationId, resumeData, jobKeywords, opti
       'UPDATE optimizations SET status = $1, optimization_notes = $2 WHERE id = $3',
       ['failed', error.message, optimizationId]
     );
+
+    throw error;
   }
-};
+});
 
 // @desc    Get all user optimizations
 // @route   GET /api/v1/optimizations
@@ -162,9 +245,22 @@ const getOptimizations = async (req, res) => {
     const userId = req.user.id;
     const db = getDB();
 
+    // Check cache first
+    const cacheKey = cacheService.generateKey('userOptimizations', userId);
+    const cachedOptimizations = await cacheService.get(cacheKey);
+    
+    if (cachedOptimizations) {
+      return res.status(200).json({
+        success: true,
+        count: cachedOptimizations.length,
+        data: cachedOptimizations,
+        fromCache: true
+      });
+    }
+
     const result = await db.query(
       `SELECT o.id, o.original_match_score, o.optimized_match_score, o.status, 
-              o.created_at, o.completed_at,
+              o.created_at, o.completed_at, o.processing_time_ms,
               r.name as resume_name,
               j.title as job_title, j.company
        FROM optimizations o
@@ -174,6 +270,11 @@ const getOptimizations = async (req, res) => {
        ORDER BY o.created_at DESC`,
       [userId]
     );
+
+    // Cache the results
+    await cacheService.set(cacheKey, result.rows, {
+      ttl: cacheService.ttlStrategies.userStats
+    });
 
     res.status(200).json({
       success: true,
@@ -322,6 +423,18 @@ const calculateMatchScore = async (req, res) => {
       });
     }
 
+    // Check cache first
+    const cacheKey = cacheService.generateKey('matchScore', userId, resumeId, jobDescriptionId);
+    const cachedScore = await cacheService.get(cacheKey);
+    
+    if (cachedScore) {
+      return res.status(200).json({
+        success: true,
+        data: cachedScore,
+        fromCache: true
+      });
+    }
+
     // Get resume data
     const resumeResult = await db.query(
       'SELECT parsed_data FROM resumes WHERE id = $1 AND user_id = $2 AND status = $3',
@@ -357,8 +470,16 @@ const calculateMatchScore = async (req, res) => {
     const resumeData = resumeResult.rows[0].parsed_data;
     const jobKeywords = jobResult.rows[0].parsed_keywords;
 
-    // Calculate match score
-    const matchScore = await calculateResumeMatchScore(resumeData, jobKeywords);
+    // Calculate match score using worker
+    const matchScore = await workerPool.runTask('MATCH_SCORE', {
+      resumeData,
+      jobKeywords
+    });
+
+    // Cache the result
+    await cacheService.set(cacheKey, matchScore, {
+      ttl: cacheService.ttlStrategies.matchScore
+    });
 
     res.status(200).json({
       success: true,

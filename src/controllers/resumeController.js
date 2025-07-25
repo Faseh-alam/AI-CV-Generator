@@ -3,7 +3,21 @@ const logger = require('../utils/logger');
 const { validateResumeUpload } = require('../utils/validation');
 const { parseResumeFile } = require('../utils/resumeParser');
 const { generateATSPDF } = require('../utils/pdfGenerator');
-const { uploadToS3 } = require('../utils/fileStorage');
+const { uploadFile } = require('../utils/fileStorage');
+const CacheService = require('../services/cacheService');
+const WorkerPool = require('../services/workerPool');
+const path = require('path');
+const { Readable } = require('stream');
+
+// Initialize services
+const cacheService = new CacheService();
+const resumeWorkerPool = new WorkerPool(
+  path.join(__dirname, '../utils/workers/resumeWorker.js'),
+  {
+    poolSize: 2,
+    maxQueueSize: 100
+  }
+);
 
 // @desc    Upload and parse resume
 // @route   POST /api/v1/resumes
@@ -20,13 +34,24 @@ const uploadResume = async (req, res) => {
       });
     }
 
-    const { error } = validateResumeUpload(req.body);
+    const { error } = await validateResumeUpload({
+      ...req.body,
+      fileMetadata: {
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        size: req.file.size
+      }
+    }, { 
+      ip: req.ip, 
+      userId: req.user.id 
+    });
+
     if (error) {
       return res.status(400).json({
         success: false,
         error: {
           code: 'VALIDATION_ERROR',
-          message: error.details[0].message
+          message: error.details?.[0]?.message || error.message
         }
       });
     }
@@ -36,21 +61,63 @@ const uploadResume = async (req, res) => {
     const userId = req.user.id;
     const db = getDB();
 
-    // Parse resume content
-    const parsedData = await parseResumeFile(file);
+    // Convert buffer to stream for secure processing
+    const fileStream = Readable.from(file.buffer);
 
-    // Upload file to storage
-    const filePath = await uploadToS3(file.buffer, file.originalname, userId);
+    // Upload file with security scanning
+    const uploadResult = await uploadFile(fileStream, file.originalname, userId);
+
+    // Check virus scan result
+    if (uploadResult.scanResult && uploadResult.scanResult.infected) {
+      logger.security('Virus detected in uploaded file', {
+        userId,
+        filename: file.originalname,
+        viruses: uploadResult.scanResult.virus
+      });
+
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'VIRUS_DETECTED',
+          message: 'File failed security scan'
+        }
+      });
+    }
+
+    // Parse resume content using worker
+    const parsedData = await resumeWorkerPool.runTask('PARSE_RESUME', {
+      fileBuffer: file.buffer,
+      mimeType: file.mimetype,
+      originalName: file.originalname
+    });
 
     // Save to database
     const result = await db.query(
-      `INSERT INTO resumes (user_id, name, original_filename, file_path, parsed_data) 
-       VALUES ($1, $2, $3, $4, $5) 
+      `INSERT INTO resumes (user_id, name, original_filename, file_path, parsed_data, file_hash, parsing_accuracy, virus_scan_result) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
        RETURNING id, name, original_filename, created_at`,
-      [userId, name, file.originalname, filePath, JSON.stringify(parsedData)]
+      [
+        userId, 
+        name, 
+        file.originalname, 
+        uploadResult.path, 
+        JSON.stringify(parsedData),
+        uploadResult.metadata?.fileHash,
+        parsedData.accuracy || 95,
+        JSON.stringify(uploadResult.scanResult || {})
+      ]
     );
 
     const resume = result.rows[0];
+
+    // Cache parsed data
+    const cacheKey = cacheService.generateKey('resumeData', userId, resume.id);
+    await cacheService.set(cacheKey, parsedData, {
+      ttl: cacheService.ttlStrategies.resumeAnalysis
+    });
+
+    // Invalidate user's resume list cache
+    await cacheService.invalidatePattern(`userResumes:*${userId}*`);
 
     // Track usage
     await db.query(
@@ -68,17 +135,31 @@ const uploadResume = async (req, res) => {
         originalFilename: resume.original_filename,
         parsedData,
         parsingAccuracy: parsedData.accuracy || 95,
+        securityScan: {
+          passed: !uploadResult.scanResult?.infected,
+          scannedAt: new Date().toISOString()
+        },
         createdAt: resume.created_at
       }
     });
   } catch (error) {
     logger.error('Resume upload error:', error);
     
-    if (error.message.includes('Invalid file type')) {
+    if (error.code === 'INVALID_FILE_TYPE') {
       return res.status(400).json({
         success: false,
         error: {
           code: 'INVALID_FILE_TYPE',
+          message: error.message
+        }
+      });
+    }
+
+    if (error.code === 'FILE_TOO_LARGE') {
+      return res.status(413).json({
+        success: false,
+        error: {
+          code: 'FILE_TOO_LARGE',
           message: error.message
         }
       });
@@ -102,13 +183,31 @@ const getResumes = async (req, res) => {
     const userId = req.user.id;
     const db = getDB();
 
+    // Check cache first
+    const cacheKey = cacheService.generateKey('userResumes', userId);
+    const cachedResumes = await cacheService.get(cacheKey);
+    
+    if (cachedResumes) {
+      return res.status(200).json({
+        success: true,
+        count: cachedResumes.length,
+        data: cachedResumes,
+        fromCache: true
+      });
+    }
+
     const result = await db.query(
-      `SELECT id, name, original_filename, created_at, updated_at, status 
+      `SELECT id, name, original_filename, created_at, updated_at, status, parsing_accuracy
        FROM resumes 
        WHERE user_id = $1 AND status = 'active' 
        ORDER BY created_at DESC`,
       [userId]
     );
+
+    // Cache the results
+    await cacheService.set(cacheKey, result.rows, {
+      ttl: cacheService.ttlStrategies.userProfile
+    });
 
     res.status(200).json({
       success: true,
@@ -136,8 +235,20 @@ const getResume = async (req, res) => {
     const userId = req.user.id;
     const db = getDB();
 
+    // Check cache first
+    const cacheKey = cacheService.generateKey('resumeData', userId, id);
+    const cachedResume = await cacheService.get(cacheKey);
+    
+    if (cachedResume) {
+      return res.status(200).json({
+        success: true,
+        data: cachedResume,
+        fromCache: true
+      });
+    }
+
     const result = await db.query(
-      `SELECT id, name, original_filename, parsed_data, created_at, updated_at 
+      `SELECT id, name, original_filename, parsed_data, created_at, updated_at, parsing_accuracy
        FROM resumes 
        WHERE id = $1 AND user_id = $2 AND status = 'active'`,
       [id, userId]
@@ -154,17 +265,24 @@ const getResume = async (req, res) => {
     }
 
     const resume = result.rows[0];
+    const responseData = {
+      id: resume.id,
+      name: resume.name,
+      originalFilename: resume.original_filename,
+      parsedData: resume.parsed_data,
+      parsingAccuracy: resume.parsing_accuracy,
+      createdAt: resume.created_at,
+      updatedAt: resume.updated_at
+    };
+
+    // Cache the result
+    await cacheService.set(cacheKey, responseData, {
+      ttl: cacheService.ttlStrategies.resumeAnalysis
+    });
 
     res.status(200).json({
       success: true,
-      data: {
-        id: resume.id,
-        name: resume.name,
-        originalFilename: resume.original_filename,
-        parsedData: resume.parsed_data,
-        createdAt: resume.created_at,
-        updatedAt: resume.updated_at
-      }
+      data: responseData
     });
   } catch (error) {
     logger.error('Get resume error:', error);
